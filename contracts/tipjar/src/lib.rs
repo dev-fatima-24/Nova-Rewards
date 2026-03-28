@@ -231,7 +231,9 @@ pub enum TipJarError {
     DexNotConfigured = 19,
     NftNotConfigured = 20,
     SwapFailed = 21,
+    ContractPaused = 22,
 }
+
 
 
 #[contract]
@@ -251,6 +253,7 @@ impl TipJarContract {
 
     /// Adds a token to the whitelist (Admin only).
     pub fn add_token(env: Env, admin: Address, token: Address) {
+        Self::require_not_paused(&env);
         admin.require_auth();
         require_role(&env, &admin, Role::Admin);
         env.storage()
@@ -260,6 +263,7 @@ impl TipJarContract {
 
     /// Removes a token from the whitelist (Admin only).
     pub fn remove_token(env: Env, admin: Address, token: Address) {
+        Self::require_not_paused(&env);
         admin.require_auth();
         require_role(&env, &admin, Role::Admin);
         env.storage()
@@ -269,9 +273,7 @@ impl TipJarContract {
 
     /// Moves `amount` tokens from `sender` into contract escrow for `creator`.
     pub fn tip(env: Env, sender: Address, creator: Address, token: Address, amount: i128) {
-        if Self::is_paused(&env) {
-            panic!("Contract is paused");
-        }
+        Self::require_not_paused(&env);
         if amount <= 0 {
             panic_with_error!(&env, TipJarError::InvalidAmount);
         }
@@ -326,9 +328,7 @@ impl TipJarContract {
         message: String,
         metadata: Map<String, String>,
     ) {
-        if Self::is_paused(&env) {
-            panic!("Contract is paused");
-        }
+        Self::require_not_paused(&env);
         if amount <= 0 {
             panic_with_error!(&env, TipJarError::InvalidAmount);
         }
@@ -409,9 +409,7 @@ impl TipJarContract {
 
     /// Allows creator to withdraw their accumulated escrowed tips for a specific token.
     pub fn withdraw(env: Env, creator: Address, token: Address) {
-        if Self::is_paused(&env) {
-            panic!("Contract is paused");
-        }
+        Self::require_not_paused(&env);
         creator.require_auth();
         require_role(&env, &creator, Role::Creator);
 
@@ -569,24 +567,29 @@ impl TipJarContract {
             .unwrap_or(false)
     }
 
-    /// Emergency pause to stop all state-changing activities (Admin or Moderator only).
+    /// Emergency pause to stop all state-changing activities (Admin only).
     pub fn pause(env: Env, admin: Address) {
         admin.require_auth();
-        require_any_role(&env, &admin, &[Role::Admin, Role::Moderator]);
+        require_role(&env, &admin, Role::Admin);
         env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((soroban_sdk::Symbol::new(&env, "contract_paused"), admin), env.ledger().timestamp());
     }
 
-    /// Resume contract activities after an emergency pause (Admin or Moderator only).
+    /// Resume contract activities after an emergency pause (Admin only).
     pub fn unpause(env: Env, admin: Address) {
         admin.require_auth();
-        require_any_role(&env, &admin, &[Role::Admin, Role::Moderator]);
+        require_role(&env, &admin, Role::Admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((soroban_sdk::Symbol::new(&env, "contract_unpaused"), admin), env.ledger().timestamp());
     }
+
+
 
     /// Replaces the contract WASM with `new_wasm_hash` (Admin only).
     /// All storage is preserved automatically by the Soroban host.
     /// Increments the on-chain version counter and emits an `upgraded` event.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        Self::require_not_paused(&env);
         admin.require_auth();
         require_role(&env, &admin, Role::Admin);
 
@@ -611,6 +614,13 @@ impl TipJarContract {
             .unwrap_or(false)
     }
 
+    fn require_not_paused(env: &Env) {
+        if Self::is_paused(env) {
+            panic_with_error!(env, TipJarError::ContractPaused);
+        }
+    }
+
+
     fn next_tip_id(env: &Env) -> u64 {
         let id: u64 = env.storage().instance().get(&DataKey::TipCounter).unwrap_or(0);
         env.storage().instance().set(&DataKey::TipCounter, &(id + 1));
@@ -619,6 +629,7 @@ impl TipJarContract {
 
     /// Sender requests a refund within the grace period (24 h). Auto-approved if within grace.
     pub fn request_refund(env: Env, sender: Address, tip_id: u64) {
+        Self::require_not_paused(&env);
         sender.require_auth();
         let mut record: TipRecord = env
             .storage()
@@ -665,6 +676,7 @@ impl TipJarContract {
 
     /// Admin approves a refund request that is past the grace period.
     pub fn approve_refund(env: Env, admin: Address, tip_id: u64) {
+        Self::require_not_paused(&env);
         admin.require_auth();
         require_role(&env, &admin, Role::Admin);
 
@@ -706,6 +718,7 @@ impl TipJarContract {
 
     /// Grants `role` to `target`. Caller must be Admin.
     pub fn grant_role(env: Env, caller: Address, target: Address, role: Role) {
+        Self::require_not_paused(&env);
         caller.require_auth();
         require_role(&env, &caller, Role::Admin);
         grant_role_internal(&env, &caller, &target, role);
@@ -714,6 +727,7 @@ impl TipJarContract {
     /// Revokes the role from `target`. Caller must be Admin.
     /// Panics with `RoleNotFound` if `target` holds no role.
     pub fn revoke_role(env: Env, caller: Address, target: Address) {
+        Self::require_not_paused(&env);
         caller.require_auth();
         require_role(&env, &caller, Role::Admin);
 
@@ -758,9 +772,7 @@ impl TipJarContract {
     /// A single `sender.require_auth()` covers the entire batch.
     pub fn tip_batch(env: Env, sender: Address, tips: soroban_sdk::Vec<BatchTip>) -> soroban_sdk::Vec<Result<(), TipJarError>> {
         // 1. Pause guard — same pattern as `tip`
-        if Self::is_paused(&env) {
-            panic!("Contract is paused");
-        }
+        Self::require_not_paused(&env);
 
         // 2. Empty batch short-circuit — no auth required
         if tips.len() == 0 {
@@ -810,9 +822,7 @@ impl TipJarContract {
         unlock_timestamp: u64,
     ) -> u64 {
         // 1. Pause guard
-        if Self::is_paused(&env) {
-            panic!("Contract is paused");
-        }
+        Self::require_not_paused(&env);
         // 2. Token whitelist check
         if !Self::is_whitelisted(env.clone(), token.clone()) {
             panic_with_error!(&env, TipJarError::TokenNotWhitelisted);
@@ -864,9 +874,7 @@ impl TipJarContract {
     /// Requires the caller to hold the `Creator` role.
     pub fn withdraw_locked(env: Env, creator: Address, tip_id: u64) {
         // 1. Pause guard
-        if Self::is_paused(&env) {
-            panic!("Contract is paused");
-        }
+        Self::require_not_paused(&env);
         // 2. Auth
         creator.require_auth();
         // 3. Role check
@@ -922,9 +930,7 @@ impl TipJarContract {
         match_ratio: u32,
         max_match_amount: i128,
     ) -> u64 {
-        if Self::is_paused(&env) {
-            panic!("Contract is paused");
-        }
+        Self::require_not_paused(&env);
         if match_ratio == 0 {
             panic_with_error!(&env, TipJarError::InvalidMatchRatio);
         }
@@ -985,9 +991,7 @@ impl TipJarContract {
         token: Address,
         amount: i128,
     ) -> i128 {
-        if Self::is_paused(&env) {
-            panic!("Contract is paused");
-        }
+        Self::require_not_paused(&env);
         if amount <= 0 {
             panic_with_error!(&env, TipJarError::InvalidAmount);
         }
@@ -1059,9 +1063,7 @@ impl TipJarContract {
 
     /// Sponsor cancels their matching program and reclaims unspent budget.
     pub fn cancel_matching_program(env: Env, sponsor: Address, program_id: u64) {
-        if Self::is_paused(&env) {
-            panic!("Contract is paused");
-        }
+        Self::require_not_paused(&env);
         sponsor.require_auth();
 
         let key = DataKey::MatchingProgram(program_id);
@@ -1131,9 +1133,7 @@ impl TipJarContract {
         input_amount: i128,
         min_output: i128,
     ) -> u64 {
-        if Self::is_paused(&env) {
-            panic!("Contract is paused");
-        }
+        Self::require_not_paused(&env);
         if input_amount <= 0 {
             panic_with_error!(&env, TipJarError::InvalidAmount);
         }
@@ -1163,9 +1163,7 @@ impl TipJarContract {
         nft_threshold: i128,
         nft_metadata: String,
     ) -> u64 {
-        if Self::is_paused(&env) {
-            panic!("Contract is paused");
-        }
+        Self::require_not_paused(&env);
 
         let tip_id = Self::tip(env.clone(), sender.clone(), creator, token, amount);
 
@@ -3059,4 +3057,32 @@ mod tests {
             soroban_sdk::FromVal::from_val(&env, &topics.get(0).unwrap());
         assert_eq!(topic_sym, soroban_sdk::Symbol::new(&env, "upgraded"));
     }
+
+    #[test]
+    fn test_pause_unpause_capabilities() {
+        let (env, contract_id, _, admin) = setup();
+        let client = TipJarContractClient::new(&env, &contract_id);
+        
+        // 1. Initial State: Read-only access should work
+        assert_eq!(client.get_version(), 0);
+        
+        // 2. Pause
+        client.pause(&admin);
+        
+        // 3. State-changing should fail
+        let wasm_hash = env.deployer().upload_contract_wasm(TipJarContract::wasm());
+        let result = client.try_upgrade(&admin, &wasm_hash);
+        assert_eq!(result.unwrap_err().unwrap(), TipJarError::ContractPaused.into());
+        
+        // 4. Read-only should still work
+        assert_eq!(client.get_version(), 0);
+        
+        // 5. Unpause
+        client.unpause(&admin);
+        
+        // 6. State-changing should work again
+        client.upgrade(&admin, &wasm_hash);
+        assert_eq!(client.get_version(), 1);
+    }
 }
+
